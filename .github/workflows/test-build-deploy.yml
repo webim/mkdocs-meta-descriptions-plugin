@@ -1,0 +1,184 @@
+name: CI/CD
+
+on: push
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            text/requirements.txt
+
+      - name: Display Python version
+        run:
+          python -c "import sys; print(sys.version)"
+
+      - name: Install dependencies
+        run:
+          pip install -r tests/requirements.txt
+
+      - name: Test with pytest
+        run:
+          pytest --cov
+        env:
+          PYTHONPATH: .
+          COVERAGE_FILE: .coverage.${{ matrix.python-version }}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage
+          path: .coverage.${{ matrix.python-version }}
+          retention-days: 3
+
+  upload-coverage:
+    name: Upload coverage
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+
+      - name: Download binaries artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: coverage
+
+      - name: Combine coverage data
+        run:
+          coverage combine
+
+      - name: Generate XML coverage report
+        run:
+          coverage xml
+
+      - name: Run codacy-coverage-reporter
+        uses: codacy/codacy-coverage-reporter-action@v1.3
+        if: always()
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: coverage.xml
+
+      - name: Upload XML coverage report artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage.xml
+          path: coverage.xml
+          retention-days: 3
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install pypa/build
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build binary wheel and source tarball
+        run:
+          python -m build --sdist --wheel --outdir dist/ .
+
+      - name: Upload binaries artifact
+        uses: actions/upload-artifact@v3
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags')
+        with:
+          name: dist
+          path: dist/
+          retention-days: 3
+
+  deploy-test:
+    name: Deploy to Test PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags') || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download binaries artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: dist
+          path: dist/
+
+      - name: Deploy to Test PyPI
+        uses: pypa/gh-action-pypi-publish@v1.8.7
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN_TEST }}
+          repository-url: https://test.pypi.org/legacy/
+
+  deploy:
+    name: Deploy to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags')
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download binaries artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: dist
+          path: dist/
+
+      - name: Deploy to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.8.7
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  deploy-gh-pages:
+    name: Deploy GitHub Pages
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --pre --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple mkdocs-meta-descriptions-plugin
+          pip install mkdocs-material
+
+      - name: Deploy GitHub Pages
+        run:
+          mkdocs gh-deploy --config-file "${GITHUB_WORKSPACE}/tests/mkdocs.yml" --verbose
